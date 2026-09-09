@@ -1,88 +1,96 @@
 # Roboko
 
-Roboko is an Android vocabulary learning application built around real-world context, AI-assisted organization, and adaptive review.
+> Version baseline: `2.0.1`
 
-A learning object is not merely a word. In Roboko, one learning item can contain multiple meaning branches, and every meaning can contain multiple authentic contexts. Review progress is tracked at the meaning level so that the application can distinguish what the learner actually remembers.
+Roboko is an Android vocabulary-learning application built around authentic context, AI-assisted organization, and adaptive review. The product treats a learning item as a reusable entity: one item may contain multiple meaning branches, and each meaning may contain multiple contexts.
 
-## Product Principles
+## Product direction
 
-- Learn from complete, readable context instead of isolated flashcards.
-- Mix new and due material in one adaptive review queue.
-- Treat the daily learning target as guidance, never as a hard queue limit.
-- Keep multiple meanings under one canonical word page.
-- Track each meaning branch independently on a `0.0` to `6.0` scale.
-- Use AI to organize meanings, contexts, categories, and follow-up learning.
-- Keep the interface quiet, focused, and free of unnecessary gamification.
+- **Context first:** review complete, readable contexts rather than isolated flashcards.
+- **Meaning aware:** keep multiple meanings under one canonical word page and track each meaning independently.
+- **Adaptive review:** mix new and review items in one queue; a daily target is guidance only, never a hard limit.
+- **Low-friction AI:** support enrichment, semantic search, categorization, follow-up questions, and related-item discovery.
+- **Quiet UX:** use a focused Material 3 interface without streak pressure or unnecessary gamification.
 
-## Core Experience
+## Confirmed learning behavior
 
-### Context-first review
+- Show one review item at a time.
+- During recall, show the full context with the target expression masked and the part of speech visible.
+- Do not show phonetics or provide target pronunciation before the answer.
+- Hints reveal Chinese and English definitions inline or in a lightweight panel.
+- After **Known** or **Unknown**, reveal the complete word card in place.
+- Save completed answers immediately; unanswered cards do not count.
+- Formal review has the strongest memory effect. Passive definition viewing records an event but does not restore progress.
+- Meaning progress is bounded from `0.0` to `6.0`, non-linear, and subject to bounded natural forgetting.
+- Contexts are sampled from the selected meaning branch, with avoidance of immediate repetition but no permanent exclusion.
+- The completion screen shows new items, review count, total learning, progress change, and mastered count; it does not show streaks.
 
-Each review card shows the full saved context while masking the target expression. The part of speech remains visible, while phonetics and pronunciation stay hidden during recall. Learners can reveal a lightweight hint containing the Chinese and English definitions before answering.
+## Information architecture
 
-After choosing **Known** or **Unknown**, Roboko expands the complete word card in place. The learner can inspect meanings and contexts or continue with an AI follow-up without leaving the review flow.
+The primary navigation contains **Home**, **Library**, **Review**, and **AI**. Settings are reached from the top bar or profile entry.
 
-### Meaning-aware memory
+- **Home:** reference target, today's summary, recent additions, and the review CTA.
+- **Library:** newest-first items, semantic search, AI categories, item details, and recycle bin.
+- **Review:** context-first recall, optional hint, answer reveal, follow-up AI, and completion summary.
+- **AI:** context-aware learning conversation that can add new learning items without changing the active review queue.
 
-A word can have several numbered meaning branches, each with its own contexts and review progress. Contexts jointly verify a meaning and are sampled with repetition avoidance. Natural forgetting follows a bounded curve, while active learning events and formal review influence future scheduling.
+## Data and domain rules
 
-### AI-assisted library
+- A canonical learning item owns multiple numbered meaning branches (`①`, `②`, `③`, ...).
+- Each meaning branch has independent progress and multiple context entries.
+- Every context, including non-representative contexts, can enter the review pool.
+- AI categories are many-to-many organizational data only; they never alter review priority or memory progress.
+- A deleted item requires confirmation, enters a seven-day recycle bin, remains searchable with a deleted indicator, and can be restored with its learning data. Restored items are categorized again; category relationships are not restored.
+- Reliable word-root or affix decomposition may be shown as a visual aid, but uncertain decomposition must be omitted.
 
-Roboko uses AI to:
+## Technology and architecture
 
-- normalize and enrich newly added learning items;
-- attach new contexts to the correct meaning branch;
-- select representative contexts;
-- organize items into flexible, many-to-many categories;
-- provide semantic search across words, definitions, translations, and contexts;
-- support contextual follow-up questions and discovery of related items.
+The planned stack is **Kotlin + Jetpack Compose + Material 3**, with Navigation Compose, ViewModel, Coroutines/`StateFlow`, Room, DataStore, and Retrofit or Ktor where remote services are needed.
 
-AI categories are for organization and retrieval only. They do not change review priority or memory progress.
+Use a single-activity Compose architecture with unidirectional state flow:
 
-### Recoverable deletion
+- UI renders immutable state and dispatches user events.
+- ViewModels call use cases.
+- Repositories isolate local and remote data sources.
+- Compose screens must not access DAOs or HTTP clients directly.
+- Keep a mock repository so the core learning flow can be demonstrated without a real AI service.
+- Keep review parameters in domain/use-case/review-engine configuration, not scattered through UI code.
 
-Deleted learning items remain in a recycle bin for seven days. They stay searchable, can be restored with their learning history, and receive time-based forgetting decay while deleted. Restored items are categorized again from the current state.
+Suggested areas:
 
-## Technology
+```text
+ui/{home,library,review,word,ai,category,recyclebin,settings}
+domain/{model,usecase,review,search,categorization}
+data/{local,remote,repository}
+core/{design,navigation,ui,util}
+```
 
-- Kotlin
-- Jetpack Compose
-- Material 3
-- Navigation Compose
-- ViewModel with Coroutines and `StateFlow`
-- Room for local persistence
-- DataStore for preferences
-- Retrofit or Ktor Client for remote services
-
-The intended architecture is a single-activity Compose application with unidirectional state flow and clear UI, domain, and data boundaries. Compose screens must not access DAOs or HTTP clients directly.
-
-## Planned Application Areas
-
-- **Home**: today's reference target, activity summary, recent additions, and review entry point.
-- **Library**: recently added items, semantic search, AI categories, and recycle bin.
-- **Review**: one context-first recall card at a time, hints, answer reveal, and session completion.
-- **AI**: a general learning conversation that can inherit the current item and meaning context.
-- **Settings**: preferences reached from the top app bar rather than permanent bottom navigation.
-
-## MVP
-
-The first complete product path is:
+## MVP path
 
 1. Add a learning item.
-2. Generate or organize its meanings and contexts with AI.
-3. Categorize it automatically.
-4. Find it in the library.
-5. Review it from a masked, full-context card.
+2. Generate or organize meanings and contexts.
+3. Categorize it with AI.
+4. Display it newest first in the library.
+5. Review it using a masked full-context card.
 6. Optionally use a hint and answer Known or Unknown.
 7. Update meaning-level progress.
 8. Reveal the complete word card.
 9. Ask an AI follow-up.
-10. Finish with a concise session summary.
+10. Finish with the concise completion summary.
+
+## Working and version policy
+
+- `handoff.md` and `processing.md` are **sensitive local files**. They must remain outside Git tracking and must never be committed.
+- `processing.md` is a mandatory audit log. Every AI or human contributor must append what it inspected, changed, decided, tested, and what remains. Never record credentials, tokens, or other secrets in it.
+- Repository versioning starts at `2.0.0`.
+- The patch counter increases by exactly `0.0.1` **only when a commit is made to GitHub**. A local edit without a GitHub commit does not increment the version.
+- The current committed baseline is `2.0.1`.
+- Commit messages must include the resulting version and a concise description of the change.
 
 ## Status
 
-Version `2.0.0` establishes the clean repository baseline and product specification. Android project implementation follows from this baseline.
+This repository currently contains the product baseline and implementation guidance. Android source implementation should follow the constraints in this README and the local handoff document.
 
 ## License
 
-No license has been selected yet. All rights are reserved unless a license is added later.
+No license has been selected. All rights reserved unless a license is added later.

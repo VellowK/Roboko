@@ -1,3 +1,18 @@
-# Local AI handoff and execution records (sensitive)
+# Sensitive local coordination and execution records
 /handoff.md
 /processing.md
+
+# Local IDE and build output
+.gradle/
+.idea/
+*.iml
+local.properties
+build/
+*/build/
+.externalNativeBuild/
+.cxx/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
