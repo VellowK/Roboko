@@ -1,18 +1,11 @@
-# Sensitive local coordination and execution records
-/handoff.md
-/processing.md
-
-# Local IDE and build output
+handoff.md
+processing.md
+handoff (1).md
+README (1).md
 .gradle/
+/build/
+/app/build/
+local.properties
 .idea/
 *.iml
-local.properties
-build/
-*/build/
-.externalNativeBuild/
-.cxx/
-
-# Local secrets and environment files
-.env
-.env.*
-!.env.example
+.DS_Store
