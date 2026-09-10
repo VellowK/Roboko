@@ -19,6 +19,8 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 
 /** 云端 STT 接口协议。 */
@@ -49,20 +51,13 @@ val sttPresets = listOf(
         "https://cloud.siliconflow.cn/account/ak", SttApiFormat.OPENAI_TRANSCRIPTION
     ),
     SttCloudConfig(
-        "mimo", "https://api.mimo.mi.com/v1", "", "mimo-v2.5-asr",
+        "mimo", "https://api.xiaomimimo.com/v1", "", "mimo-v2.5-asr",
         "https://mimo.mi.com/", SttApiFormat.CHAT_AUDIO
-    ),
-    SttCloudConfig(
-        "groq", "https://api.groq.com/openai/v1", "", "whisper-large-v3-turbo",
-        "https://console.groq.com/keys", SttApiFormat.OPENAI_TRANSCRIPTION
     ),
     SttCloudConfig(
         "openai", "https://api.openai.com/v1", "", "whisper-1",
         "https://platform.openai.com/api-keys", SttApiFormat.OPENAI_TRANSCRIPTION
-    ),
-    // 火山走的是私有 WebSocket 协议（大模型流式语音识别），不兼容以上两种接口，
-    // 这里仅用于展示申请入口，实际接入待后续实现。
-    SttCloudConfig("volcano", "", "", "", "https://console.volcengine.com/speech/app", SttApiFormat.OPENAI_TRANSCRIPTION)
+    )
 )
 
 /**
@@ -102,11 +97,12 @@ class CloudVoiceInput(private val context: Context) : SttController {
         }
         if (isListening) return false
         return try {
-            val wav = File(context.cacheDir, "stt-upload.wav")
+            val wav = File(context.cacheDir, "stt-rec.wav")
             if (wav.exists()) wav.delete()
+            val partialFile = File(context.cacheDir, "stt-partial.wav")
             val out = RandomAccessFile(wav, "rw")
             out.setLength(0)
-            out.write(ByteArray(44))   // 先占位 WAV 头，收尾时回填长度
+            out.write(ByteArray(44))   // 先占位 WAV 头，每次发送前回填长度
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             val record = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, CHUNK * 4))
             if (record.state != AudioRecord.STATE_INITIALIZED) {
@@ -117,16 +113,62 @@ class CloudVoiceInput(private val context: Context) : SttController {
             audioRecord = record
             running = true
             isListening = true
+            val lastPartialText = AtomicReference("")
+            val partialInFlight = AtomicBoolean(false)
             worker = Thread {
                 val buf = ByteArray(CHUNK)
                 var pcmBytes = 0L
+                var peak = 0
+                var lastPartialAt = 0L
                 try {
                     record.startRecording()
                     while (running) {
                         val n = record.read(buf, 0, buf.size)
                         if (n <= 0) continue
+                        out.seek(pcmBytes + 44)     // 始终追加到音频末尾
                         out.write(buf, 0, n)
                         pcmBytes += n
+                        // 记录峰值音量，便于判断「麦克风没录到声音」还是「服务没返回文字」
+                        var i = 0
+                        while (i + 1 < n) {
+                            val lo = buf[i].toInt() and 0xFF
+                            val hi = buf[i + 1].toInt()
+                            val s = ((hi shl 8) or lo).toShort().toInt()
+                            val a = if (s < 0) -s else s
+                            if (a > peak) peak = a
+                            i += 2
+                        }
+                        // 分块伪流式：每隔一段时间把已录音频送一次，实现边录边出字
+                        val now = System.currentTimeMillis()
+                        if (pcmBytes >= MIN_BYTES_FOR_PARTIAL &&
+                            now - lastPartialAt >= PARTIAL_INTERVAL_MS &&
+                            partialInFlight.compareAndSet(false, true)
+                        ) {
+                            lastPartialAt = now
+                            val copied = try {
+                                writeWavHeader(out, pcmBytes)
+                                out.seek(pcmBytes + 44)
+                                wav.inputStream().use { input -> partialFile.outputStream().use { input.copyTo(it) } }
+                                true
+                            } catch (_: Exception) { false }
+                            if (!copied) {
+                                partialInFlight.set(false)
+                            } else {
+                                scope.launch {
+                                    try {
+                                        val text = transcribe(partialFile, config, PARTIAL_TIMEOUT_MS)
+                                        if (text.isNotBlank()) {
+                                            lastPartialText.set(text)
+                                            main.post { onPartial(text) }
+                                        }
+                                    } catch (_: Exception) {
+                                        // 分块失败不打扰用户，停止时仍会用完整音频重试
+                                    } finally {
+                                        partialInFlight.set(false)
+                                    }
+                                }
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "录音异常", e)
@@ -141,18 +183,29 @@ class CloudVoiceInput(private val context: Context) : SttController {
                         writeWavHeader(out, pcmBytes)
                         out.close()
                     } catch (_: Exception) {}
-                    if (pcmBytes < SAMPLE_RATE) {   // 少于约 0.5 秒视为没说话
+                    if (pcmBytes < SAMPLE_RATE / 2) {   // 少于约 0.5 秒视为没说话
                         main.post { onError("录音太短，请再试一次"); onFinal("") }
                         return@Thread
                     }
                     scope.launch {
-                        val result = runCatching { transcribe(wav, config) }
+                        val result = runCatching { transcribe(wav, config, FINAL_TIMEOUT_MS) }
                         main.post {
                             val text = result.getOrNull()
-                            if (!text.isNullOrBlank()) onFinal(text)
-                            else {
-                                onError(result.exceptionOrNull()?.message ?: "没有识别到内容")
-                                onFinal("")
+                            val fallback = lastPartialText.get()
+                            when {
+                                !text.isNullOrBlank() -> onFinal(text)
+                                // 整段请求失败时，用最后一次分块结果兜底，避免已识别内容白费
+                                fallback.isNotBlank() -> onFinal(fallback)
+                                else -> {
+                                    val seconds = pcmBytes / 2.0 / SAMPLE_RATE
+                                    val detail = result.exceptionOrNull()?.let { friendlyError(it.message ?: "识别失败") }
+                                        ?: "服务返回了空文本。已录制 %.1f 秒，峰值音量 %d/32767%s".format(
+                                            seconds, peak,
+                                            if (peak < 300) "（几乎没有声音，请检查麦克风权限或换个环境）" else "（录音正常，可能是音频格式或模型问题）"
+                                        )
+                                    onError(detail)
+                                    onFinal("")
+                                }
                             }
                         }
                     }
@@ -179,19 +232,19 @@ class CloudVoiceInput(private val context: Context) : SttController {
 
     // ---------------------------------------------------------------- 上传转写
 
-    private fun transcribe(wav: File, config: SttCloudConfig): String = when (config.format) {
-        SttApiFormat.OPENAI_TRANSCRIPTION -> transcribeMultipart(wav, config)
-        SttApiFormat.CHAT_AUDIO -> transcribeChatAudio(wav, config)
+    private fun transcribe(wav: File, config: SttCloudConfig, readTimeoutMs: Int = 120000): String = when (config.format) {
+        SttApiFormat.OPENAI_TRANSCRIPTION -> transcribeMultipart(wav, config, readTimeoutMs)
+        SttApiFormat.CHAT_AUDIO -> transcribeChatAudio(wav, config, readTimeoutMs)
     }
 
     /** OpenAI 风格：multipart 上传到 /audio/transcriptions。 */
-    private fun transcribeMultipart(wav: File, config: SttCloudConfig): String {
+    private fun transcribeMultipart(wav: File, config: SttCloudConfig, readTimeoutMs: Int): String {
         val boundary = "----RobokoBoundary" + System.currentTimeMillis()
         val url = URL(config.baseUrl.trimEnd('/') + "/audio/transcriptions")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 20000
-            readTimeout = 60000
+            connectTimeout = 15000
+            readTimeout = readTimeoutMs
             doOutput = true
             setRequestProperty("Authorization", "Bearer ${config.apiKey}")
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
@@ -211,7 +264,7 @@ class CloudVoiceInput(private val context: Context) : SttController {
             val code = conn.responseCode
             val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) throw IllegalStateException("转写失败（HTTP $code）${body.take(160)}")
+            if (code !in 200..299) throw IllegalStateException("HTTP $code|${body.take(300)}")
             return JSONObject(body).optString("text", "").trim()
         } finally {
             conn.disconnect()
@@ -220,7 +273,7 @@ class CloudVoiceInput(private val context: Context) : SttController {
     }
 
     /** 对话式音频输入：base64 音频放进 messages 打到 /chat/completions（小米 MiMo ASR）。 */
-    private fun transcribeChatAudio(wav: File, config: SttCloudConfig): String {
+    private fun transcribeChatAudio(wav: File, config: SttCloudConfig, readTimeoutMs: Int): String {
         val base64Audio = Base64.encodeToString(wav.readBytes(), Base64.NO_WRAP)
         val payload = JSONObject().apply {
             put("model", config.model)
@@ -228,15 +281,18 @@ class CloudVoiceInput(private val context: Context) : SttController {
                 put("role", "user")
                 put("content", JSONArray().put(JSONObject().apply {
                     put("type", "input_audio")
-                    put("input_audio", JSONObject().put("data", "data:audio/wav;base64,$base64Audio"))
+                    put("input_audio", JSONObject().apply {
+                        put("data", "data:audio/wav;base64,$base64Audio")
+                        put("format", "wav")
+                    })
                 }))
             }))
             put("asr_options", JSONObject().put("language", "auto"))
         }
         val conn = (URL(config.baseUrl.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
-            connectTimeout = 20000
-            readTimeout = 120000
+            connectTimeout = 15000
+            readTimeout = readTimeoutMs
             doOutput = true
             setRequestProperty("api-key", config.apiKey)                    // MiMo 采用该鉴权头
             setRequestProperty("Authorization", "Bearer ${config.apiKey}")   // 兼容其他实现
@@ -247,7 +303,7 @@ class CloudVoiceInput(private val context: Context) : SttController {
             val code = conn.responseCode
             val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (code !in 200..299) throw IllegalStateException("转写失败（HTTP $code）${body.take(160)}")
+            if (code !in 200..299) throw IllegalStateException("HTTP $code|${body.take(300)}")
             val content = JSONObject(body).optJSONArray("choices")
                 ?.optJSONObject(0)?.optJSONObject("message")?.opt("content")
             return when (content) {
@@ -291,16 +347,40 @@ class CloudVoiceInput(private val context: Context) : SttController {
      */
     suspend fun test(config: SttCloudConfig): String = withContext(Dispatchers.IO) {
         if (!config.isComplete()) return@withContext "✗ 请先填写接口地址、API Key 和模型名称"
+        // 先探测域名能否连通，用来区分「手机网络到不了」和「接口/配置有问题」
+        probeReachable(config)?.let { return@withContext it }
         val wav = File(context.cacheDir, "stt-test.wav")
         try {
             writeSilentWav(wav, 1200)
-            val text = transcribe(wav, config)
+            // 测试用较短超时，避免界面长时间停在「测试中」
+            val text = transcribe(wav, config, TEST_TIMEOUT_MS)
             if (text.isBlank()) "✓ 配置可用：服务已正常响应（静音音频无文字属正常）"
             else "✓ 配置可用，识别到：$text"
         } catch (e: Exception) {
-            friendlyError(e.message ?: "测试失败")
+            val raw = e.message ?: "测试失败"
+            // 部分服务对纯静音音频会报「无语音内容」，这属于服务正常响应，配置本身没问题
+            if (isNoSpeechError(raw)) "✓ 配置可用：服务已正常响应（测试音频为静音，提示无语音内容属正常）"
+            else friendlyError(raw)
         } finally {
             try { wav.delete() } catch (_: Exception) {}
+        }
+    }
+
+    /** 轻量连通性探测：返回 null 表示可达，否则返回给用户看的说明。任何 HTTP 状态码都算可达。 */
+    private fun probeReachable(config: SttCloudConfig): String? {
+        val probeUrl = config.baseUrl.trimEnd('/') + "/models"
+        return try {
+            val c = (URL(probeUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8000
+                readTimeout = 8000
+                setRequestProperty("Authorization", "Bearer ${config.apiKey}")
+                setRequestProperty("api-key", config.apiKey)
+            }
+            try { c.responseCode } finally { c.disconnect() }
+            null
+        } catch (e: Exception) {
+            "✗ 连不上 ${config.baseUrl}\n原因：${e.message ?: "未知错误"}\n请确认手机网络能访问该域名（可尝试切换 WiFi / 移动数据）"
         }
     }
 
@@ -315,18 +395,41 @@ class CloudVoiceInput(private val context: Context) : SttController {
         }
     }
 
-    private fun friendlyError(raw: String): String = when {
-        raw.contains("401") -> "✗ API Key 无效或未授权（HTTP 401）"
-        raw.contains("403") -> "✗ 无权限或余额不足（HTTP 403）"
-        raw.contains("404") -> "✗ 接口地址不正确，应填到 /v1 为止（HTTP 404）"
-        raw.contains("429") -> "✗ 请求过于频繁，稍后再试（HTTP 429）"
-        raw.contains("Unable to resolve host") || raw.contains("Failed to connect") || raw.contains("timeout") -> "✗ 网络不通，请检查网络或代理"
-        else -> "✗ $raw"
+    private fun isNoSpeechError(raw: String): Boolean {
+        val s = raw.lowercase()
+        return s.contains("no speech") || s.contains("no valid speech") || s.contains("silence") ||
+            s.contains("too short") || s.contains("empty audio") || s.contains("静音") || s.contains("无语音")
+    }
+
+    /** 把原始错误翻译成结论，并保留服务端返回的原文，便于定位。 */
+    private fun friendlyError(raw: String): String {
+        val code = raw.substringAfter("HTTP ", "").substringBefore("|").trim()
+        val body = raw.substringAfter("|", "").trim()
+        val head = when {
+            code == "401" -> "API Key 无效或未授权（HTTP 401）"
+            code == "403" -> "无权限、账号未实名或余额不足（HTTP 403）"
+            code == "404" -> "接口地址不正确，应填到 /v1 为止（HTTP 404）"
+            code == "429" -> "请求过于频繁，稍后再试（HTTP 429）"
+            code.startsWith("5") -> "服务端错误（HTTP $code），稍后重试"
+            raw.contains("Unable to resolve host") -> "域名解析失败，请检查手机网络"
+            raw.contains("Failed to connect") || raw.contains("connect timed out") -> "建立连接超时，手机网络可能无法访问该域名"
+            raw.contains("Read timed out") || raw.contains("timed out") -> "服务器响应超时（网络能连通但没及时返回）"
+            code.isNotBlank() -> "服务返回 HTTP $code"
+            else -> raw
+        }
+        return "✗ $head" + if (body.isNotBlank()) "\n服务返回：$body" else ""
     }
 
     companion object {
         private const val TAG = "CloudVoiceInput"
         private const val SAMPLE_RATE = 16000
         private const val CHUNK = 3200
+        private const val TEST_TIMEOUT_MS = 30000
+        private const val PARTIAL_TIMEOUT_MS = 20000
+        private const val FINAL_TIMEOUT_MS = 60000
+        /** 分块伪流式：每隔多久把已录音频送一次。 */
+        private const val PARTIAL_INTERVAL_MS = 1500L
+        /** 至少录到约 1.2 秒才开始分块，太短识别不出东西。 */
+        private const val MIN_BYTES_FOR_PARTIAL = SAMPLE_RATE * 2 * 6 / 5
     }
 }
