@@ -66,6 +66,8 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.LibraryAdd
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
@@ -121,6 +123,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.AndroidViewModel
 import androidx.room.Dao
@@ -259,8 +262,6 @@ private class LocalProviderStore(context: android.content.Context) {
     private fun decrypt(value: String): String { if (value.isBlank()) return ""; return try { val bytes = Base64.decode(value, Base64.NO_WRAP); Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12))) }.doFinal(bytes.copyOfRange(12, bytes.size)).toString(Charsets.UTF_8) } catch (_: Exception) { "" } }
     fun load(): ProviderConfig { val preset = providerPresets.firstOrNull { it.id == prefs.getString("id", "deepseek") } ?: providerPresets.first(); return preset.copy(name = prefs.getString("name", preset.name) ?: preset.name, baseUrl = prefs.getString("baseUrl", preset.baseUrl) ?: preset.baseUrl, model = prefs.getString("model", preset.model) ?: preset.model, apiKey = decrypt(prefs.getString("apiKey", "") ?: ""), enabled = true, format = runCatching { ApiFormat.valueOf(prefs.getString("format", preset.format.name) ?: preset.format.name) }.getOrDefault(preset.format), responseApi = prefs.getBoolean("responseApi", preset.responseApi)) }
     fun save(config: ProviderConfig) { prefs.edit().putString("id", config.id).putString("name", config.name).putString("baseUrl", config.baseUrl).putString("model", config.model).putString("format", config.format.name).putBoolean("responseApi", config.responseApi).putString("apiKey", encrypt(config.apiKey)).apply() }
-    fun loadMessages(): List<String> = try { val array = org.json.JSONArray(prefs.getString("messages", "[]") ?: "[]"); (0 until array.length()).map { array.getString(it) } } catch (_: Exception) { emptyList() }
-    fun saveMessages(messages: List<String>) { val array = org.json.JSONArray(); messages.forEach { array.put(it) }; prefs.edit().putString("messages", array.toString()).apply() }
     fun loadStt(): SttEngine = runCatching { SttEngine.valueOf(prefs.getString("sttEngine", SttEngine.SYSTEM.name) ?: SttEngine.SYSTEM.name) }.getOrDefault(SttEngine.SYSTEM)
     fun saveStt(engine: SttEngine) { prefs.edit().putString("sttEngine", engine.name).apply() }
     // 各预设的 API Key 分开保存，避免切换预设时串用
@@ -317,11 +318,9 @@ private object AiClient {
 
 data class ReviewUiState(val card: ReviewCard?, val item: LearningItem?, val stage: ReviewStage = ReviewStage.RECALL, val hintUsed: Boolean = false, val answered: Int = 0, val results: List<ReviewResult> = emptyList())
 
-data class GeneratedItem(val item: LearningItem)
-
 enum class LibrarySort { ADDED, ALPHABETICAL, MASTERY }
 
-data class AppUiState(val tab: Tab = Tab.AI, val items: List<LearningItem> = emptyList(), val selectedItemId: String? = null, val query: String = "", val librarySort: LibrarySort = LibrarySort.ADDED, val sortDescending: Boolean = true, val stats: TodayStats = TodayStats(0, 0, 0, 0.0, 0), val review: ReviewUiState = ReviewUiState(null, null), val aiMessages: List<String> = listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。"), val aiLoading: Boolean = false, val showSettings: Boolean = false, val provider: ProviderConfig = providerPresets.first(), val generatedItem: LearningItem? = null, val generatingItem: Boolean = false, val itemError: String? = null, val aiReference: LearningItem? = null, val balanceStatus: String? = null, val updateVersion: String? = null, val updateNotes: String = "", val updateUrl: String? = null, val updateChecking: Boolean = false, val mirror: String = "GitHub 官方", val sttEngine: SttEngine = SttEngine.SYSTEM, val sttCloud: SttCloudConfig = SttCloudConfig(), val sttKeys: Map<String, String> = emptyMap(), val sttTesting: Boolean = false, val sttStatus: String? = null)
+data class AppUiState(val tab: Tab = Tab.AI, val items: List<LearningItem> = emptyList(), val selectedItemId: String? = null, val query: String = "", val librarySort: LibrarySort = LibrarySort.ADDED, val sortDescending: Boolean = true, val stats: TodayStats = TodayStats(0, 0, 0, 0.0, 0), val review: ReviewUiState = ReviewUiState(null, null), val aiMessages: List<String> = listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。"), val aiLoading: Boolean = false, val showSettings: Boolean = false, val provider: ProviderConfig = providerPresets.first(), val generatedItem: LearningItem? = null, val generatingItem: Boolean = false, val itemError: String? = null, val aiReference: LearningItem? = null, val balanceStatus: String? = null, val updateVersion: String? = null, val updateNotes: String = "", val updateUrl: String? = null, val updateChecking: Boolean = false, val mirror: String = "GitHub 官方", val sttEngine: SttEngine = SttEngine.SYSTEM, val sttCloud: SttCloudConfig = SttCloudConfig(), val sttKeys: Map<String, String> = emptyMap(), val sttTesting: Boolean = false, val sttStatus: String? = null, val aiTextRef: String? = null)
 
 object ReviewEngine {
     fun update(progress: Double, known: Boolean, hint: Boolean): Double {
@@ -330,17 +329,12 @@ object ReviewEngine {
     }
 }
 
-class MockRepository(context: android.content.Context) {
+/** 学习条目的仓储层（Room 持久化）。 */
+class LearningRepository(context: android.content.Context) {
     private val room = RoomItemStore(context)
-    private val now = Instant.now()
-    private val initial = LearningItem("cancel", "cancel", "can·cel", "/ˈkæn.səl/", "/ˈkæn.səl/", now.minusSeconds(3600), null, listOf(
-        MeaningBranch("cancel-1", 1, "取消；终止", "verb", "to decide that a planned event will not happen", "取消；终止", 3.2, listOf(ContextEntry("c1", "The company decided to cancel the meeting.", "公司决定取消会议。", now.minusSeconds(3600), true), ContextEntry("c2", "You can cancel your reservation online.", "你可以在线取消预订。", now.minusSeconds(1800), false))),
-        MeaningBranch("cancel-2", 2, "抵消；撤销", "verb", "to offset or neutralize an effect", "抵消；撤销", 1.5, listOf(ContextEntry("c3", "The two signals cancel each other out.", "两个信号相互抵消。", now.minusSeconds(1200), true)))
-    ), listOf("工作沟通", "日常表达"))
-    private val _items = MutableStateFlow(room.load().ifEmpty { listOf(initial).also { room.save(initial) } })
+    private val _items = MutableStateFlow(room.load())
     val items: StateFlow<List<LearningItem>> = _items.asStateFlow()
-    var lastCard: ReviewCard? = null
-    var stats = TodayStats(0, 2, 2, 0.0, 0)
+    var stats = TodayStats(0, 0, 0, 0.0, 0)
 
     fun save(item: LearningItem) {
         _items.value = listOf(item) + _items.value.filterNot { it.id == item.id }
@@ -365,7 +359,7 @@ class MockRepository(context: android.content.Context) {
 }
 
 class RobokoViewModel(app: android.app.Application) : AndroidViewModel(app) {
-    private val repo = MockRepository(app)
+    private val repo = LearningRepository(app)
     private val roomStore = RoomItemStore(app)
     private val providerStore = LocalProviderStore(app)
     private val _state = MutableStateFlow(AppUiState(items = repo.items.value, stats = repo.stats, aiMessages = roomStore.loadMessages().ifEmpty { listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。") }, provider = providerStore.load(), sttEngine = providerStore.loadStt(), sttCloud = providerStore.loadSttCloud(), sttKeys = providerStore.loadSttCloudKeys()))
@@ -413,12 +407,19 @@ class RobokoViewModel(app: android.app.Application) : AndroidViewModel(app) {
         if (_state.value.sttEngine == SttEngine.SYSTEM && systemVoice.isReady) systemVoice else cloudVoice
     fun tab(tab: Tab) { _state.value = _state.value.copy(tab = tab, selectedItemId = null) }
     fun search(q: String) { _state.value = _state.value.copy(query = q) }
-    fun cycleSort() { val current = _state.value; val next = when (current.librarySort) { LibrarySort.ADDED -> LibrarySort.ALPHABETICAL; LibrarySort.ALPHABETICAL -> LibrarySort.MASTERY; LibrarySort.MASTERY -> LibrarySort.ADDED }; _state.value = current.copy(librarySort = next, sortDescending = if (next == current.librarySort) !current.sortDescending else true) }
     fun setSort(sort: LibrarySort) { _state.value = _state.value.copy(librarySort = sort) }
     fun toggleSortDirection() { _state.value = _state.value.copy(sortDescending = !_state.value.sortDescending) }
-    fun openSettings() { _state.value = _state.value.copy(showSettings = true) }
     fun saveProvider(config: ProviderConfig) { providerStore.save(config); _state.value = _state.value.copy(provider = config, showSettings = false, tab = Tab.AI, balanceStatus = null) }
-    fun deleteItem(id: String) { repo.delete(id); _state.value = _state.value.copy(selectedItemId = null, tab = Tab.LIBRARY) }
+    fun deleteItem(id: String) {
+        repo.delete(id)
+        val current = _state.value
+        _state.value = current.copy(
+            selectedItemId = null,
+            tab = Tab.LIBRARY,
+            // 若删掉的正是当前引用的词条，一并清掉引用，避免留下悬空引用
+            aiReference = current.aiReference?.takeIf { it.id != id }
+        )
+    }
     fun checkBalance(config: ProviderConfig) {
         _state.value = _state.value.copy(balanceStatus = "查询中...")
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -445,6 +446,10 @@ class RobokoViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun select(id: String) { _state.value = _state.value.copy(selectedItemId = id) }
     fun openAiFor(item: LearningItem) { _state.value = _state.value.copy(aiReference = item, tab = Tab.AI, selectedItemId = null) }
     fun clearReference() { _state.value = _state.value.copy(aiReference = null) }
+
+    /** 引用一段对话文本作为提问上下文（与引用单词同一套机制，不塞进输入框）。 */
+    fun quoteText(value: String) { if (value.isNotBlank()) _state.value = _state.value.copy(aiTextRef = value) }
+    fun clearTextRef() { _state.value = _state.value.copy(aiTextRef = null) }
 
     /** 编辑某条用户消息：截断该条及其之后的对话，用新内容重新提问，让 AI 重新生成回答。 */
     fun editUserMessage(index: Int, newText: String) {
@@ -478,11 +483,15 @@ class RobokoViewModel(app: android.app.Application) : AndroidViewModel(app) {
     fun ask(text: String) {
         if (text.isBlank() || _state.value.aiLoading) return
         val ref = _state.value.aiReference
-        val reference = ref?.let { item -> "${item.displayForm}：${item.meanings.joinToString("；") { it.label + " - " + it.chineseDefinition }}" }
+        val quoted = _state.value.aiTextRef
+        val reference = buildString {
+            if (!quoted.isNullOrBlank()) append("用户引用的对话内容：").append(quoted).append('\n')
+            if (ref != null) append(ref.displayForm).append("：").append(ref.meanings.joinToString("；") { it.label + " - " + it.chineseDefinition })
+        }.trim().ifBlank { null }
         val refTag = ref?.let { item -> REF_MARK + item.displayForm + "\u0001" + (item.meanings.firstOrNull()?.let { it.label + " · " + it.chineseDefinition } ?: "") } ?: ""
         val userMessage = "你：$text$refTag"
         val history = _state.value.aiMessages + userMessage
-        _state.value = _state.value.copy(aiMessages = history, aiLoading = true, aiReference = null)
+        _state.value = _state.value.copy(aiMessages = history, aiLoading = true, aiReference = null, aiTextRef = null)
         roomStore.saveMessage(userMessage)
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val response = try { "AI：${AiClient.ask(_state.value.provider, history.dropLast(1), text, reference)}" } catch (error: Exception) { "AI：请求失败：${error.message ?: "未知错误"}" }
@@ -607,7 +616,7 @@ fun AboutScreen(vm: RobokoViewModel, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回设置") }; Text("关于 Roboko", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp)); Card(Modifier.fillMaxWidth().clickable { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/VellowK/Roboko"))) }) { Text("GitHub 仓库\nVellowK/Roboko", Modifier.padding(16.dp)) }
-        Text("版本 2.0.0", Modifier.padding(top = 16.dp)); Text("构建日期：2026-09-09", style = MaterialTheme.typography.bodySmall)
+        Text("版本 2.0.1", Modifier.padding(top = 16.dp)); Text("构建日期：2026-09-10", style = MaterialTheme.typography.bodySmall)
         if (s.updateChecking) Text("正在检查更新...", Modifier.padding(top = 12.dp))
         s.updateVersion?.let { version ->
             Card(Modifier.fillMaxWidth().padding(top = 18.dp), colors = CardDefaults.cardColors(containerColor = androidx.compose.ui.graphics.Color(0xFFFFE0E0))) { Column(Modifier.padding(16.dp)) { Text(version, style = MaterialTheme.typography.titleLarge, color = androidx.compose.ui.graphics.Color(0xFFB3261E)); Text(if (expanded) s.updateNotes else s.updateNotes.take(120), Modifier.padding(top = 8.dp)); TextButton({ expanded = !expanded }) { Text(if (expanded) "收起" else "展开") }; s.updateUrl?.let { url -> Button({ vm.startUpdate(url) }, Modifier.fillMaxWidth()) { Text("更新") } } } }
@@ -786,8 +795,30 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
     var editing by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var selIndex by remember { mutableStateOf<Int?>(null) }
     var textSelect by remember { mutableStateOf(false) }
+    var voiceMode by remember { mutableStateOf(false) }
+    var voiceDraft by remember { mutableStateOf("") }
     val clipboard = LocalClipboardManager.current
     val listState = rememberLazyListState()
+    val selBody = selIndex?.let { i -> s.aiMessages.getOrNull(i)?.substringBefore(REF_MARK)?.removePrefix("你：")?.removePrefix("AI：") } ?: ""
+    // 只渲染最近 4 条，往上翻到顶再多加载 4 条
+    var visibleCount by remember { mutableStateOf(4) }
+    var didInitialScroll by remember { mutableStateOf(false) }
+    val visibleMessages = if (s.aiMessages.size <= visibleCount) s.aiMessages else s.aiMessages.takeLast(visibleCount)
+    val msgOffset = s.aiMessages.size - visibleMessages.size
+
+    // 进入页面直接跳到对话末尾
+    LaunchedEffect(visibleMessages.size) {
+        if (!didInitialScroll && visibleMessages.isNotEmpty()) {
+            listState.scrollToItem(visibleMessages.lastIndex)
+            didInitialScroll = true
+        }
+    }
+    // 上翻到顶时追加加载更早的 4 条
+    LaunchedEffect(listState, s.aiMessages.size) {
+        snapshotFlow { listState.firstVisibleItemIndex }.collect { idx ->
+            if (didInitialScroll && idx == 0 && s.aiMessages.size > visibleCount) visibleCount += 4
+        }
+    }
 
     // 智能滚动：仅在原本就贴近底部时跟随，往上翻历史不会被强行拖回
     LaunchedEffect(s.aiMessages.size, s.aiLoading, transcribing) {
@@ -800,7 +831,17 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            Text("AI 学习空间", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(top = 22.dp, bottom = 16.dp))
+            // 标题栏右侧就是选中消息的操作区（整个页面的右上角）
+            Row(Modifier.fillMaxWidth().padding(top = 22.dp, bottom = 16.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Text("AI 学习空间", style = MaterialTheme.typography.headlineMedium)
+                Spacer(Modifier.weight(1f))
+                if (selIndex != null && !textSelect) {
+                    MsgAction(Icons.Default.ContentCopy, "复制") { clipboard.setText(AnnotatedString(selBody)); selIndex = null }
+                    MsgAction(Icons.Default.LibraryAdd, "加入单词本") { vm.generateItem(selBody); selIndex = null }
+                    MsgAction(Icons.Default.Translate, "翻译") { vm.ask("把这句翻译成中文，只给译文：$selBody"); selIndex = null }
+                    MsgAction(Icons.Default.FormatQuote, "引用提问") { vm.quoteText(selBody); selIndex = null }
+                }
+            }
             // 点击空白处：先退出文字选择，再取消整条选中
             Box(
                 Modifier.weight(1f).pointerInput(Unit) {
@@ -808,7 +849,8 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                 }
             ) {
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(s.aiMessages) { index, message ->
+                    itemsIndexed(visibleMessages, key = { i, _ -> msgOffset + i }) { index, message ->
+                        val absIndex = msgOffset + index
                         val isUser = message.startsWith("你：")
                         val full = message.substringBefore(REF_MARK).removePrefix("你：").removePrefix("AI：")
                         val refPart = if (message.contains(REF_MARK)) message.substringAfter(REF_MARK) else null
@@ -818,30 +860,22 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                         val recLine = if (isUser) null else full.lines().firstOrNull { it.trim().startsWith("推荐加入单词本") }
                         val recommends = recLine?.substringAfter("：", "")?.split(",", "，")?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList()
                         val body = if (recLine == null) full else full.lines().filterNot { it.trim().startsWith("推荐加入单词本") }.joinToString("\n").trim()
-                        val selected = selIndex == index
+                        val selected = selIndex == absIndex
                         val bubbleColor = if (isUser) androidx.compose.ui.graphics.Color(0xFFE8EEF2) else androidx.compose.ui.graphics.Color(0xFFDDF2EC)
+                        var selRange by remember(message) { mutableStateOf(TextRange(0, body.length)) }
 
                         Column(Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) androidx.compose.ui.Alignment.End else androidx.compose.ui.Alignment.Start) {
-                            // 选中后四个操作图标固定在右上角，长消息也够得着
-                            if (selected && !textSelect) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                                    MsgAction(Icons.Default.ContentCopy, "复制") { clipboard.setText(AnnotatedString(body)); selIndex = null }
-                                    MsgAction(Icons.Default.LibraryAdd, "加入单词本") { vm.generateItem(body); selIndex = null }
-                                    MsgAction(Icons.Default.Translate, "翻译") { vm.ask("把这句翻译成中文，只给译文：$body"); selIndex = null }
-                                    MsgAction(Icons.Default.FormatQuote, "引用提问") { text = body; selIndex = null }
-                                }
-                            }
                             Row(verticalAlignment = androidx.compose.ui.Alignment.Bottom) {
                                 // 左下角勾选标记，同时把卡片向右推开
                                 if (selected) Icon(Icons.Default.CheckCircle, "已选中", tint = Teal, modifier = Modifier.padding(end = 6.dp, bottom = 10.dp).size(18.dp))
-                                if (isUser && !selected) IconButton({ editing = index to body }, Modifier.size(26.dp)) { Icon(Icons.Default.Edit, "编辑并重新生成", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp)) }
+                                if (isUser && !selected) IconButton({ editing = absIndex to body }, Modifier.size(26.dp)) { Icon(Icons.Default.Edit, "编辑并重新生成", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(15.dp)) }
                                 if (selected && textSelect) {
                                     // 文字选择：用只读输入框才能读到选中的文本
-                                    var tf by remember(message) { mutableStateOf(TextFieldValue(body, TextRange(0, body.length))) }
+                                    var tf by remember(message) { mutableStateOf(TextFieldValue(body, selRange)) }
                                     val picked = if (tf.selection.length > 0) tf.text.substring(tf.selection.min, tf.selection.max) else ""
                                     // 操作卡片弹在消息旁边并对齐顶部，长消息也不用滚到底
                                     if (isUser) {
-                                        TextSelActions(Modifier.align(androidx.compose.ui.Alignment.Top), clipboard, picked, { text = picked }, { vm.ask("把这段翻译成中文，只给译文：$picked") })
+                                        TextSelActions(Modifier.align(androidx.compose.ui.Alignment.Top), clipboard, picked, { vm.quoteText(picked) }, { vm.ask("把这段翻译成中文，只给译文：$picked") })
                                         Spacer(Modifier.width(6.dp))
                                     }
                                     Surface(color = bubbleColor, shape = RoundedCornerShape(16.dp), modifier = Modifier.weight(1f, fill = false).widthIn(max = 250.dp)) {
@@ -855,9 +889,10 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                                     }
                                     if (!isUser) {
                                         Spacer(Modifier.width(6.dp))
-                                        TextSelActions(Modifier.align(androidx.compose.ui.Alignment.Top), clipboard, picked, { text = picked }, { vm.ask("把这段翻译成中文，只给译文：$picked") })
+                                        TextSelActions(Modifier.align(androidx.compose.ui.Alignment.Top), clipboard, picked, { vm.quoteText(picked) }, { vm.ask("把这段翻译成中文，只给译文：$picked") })
                                     }
                                 } else {
+                                    var layoutResult by remember(message) { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
                                     Surface(
                                         color = bubbleColor,
                                         shape = RoundedCornerShape(16.dp),
@@ -865,16 +900,23 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                                             .widthIn(max = 280.dp)
                                             .pointerInput(message, selected) {
                                                 detectTapGestures(
-                                                    onLongPress = {
-                                                        if (selIndex == index) textSelect = true
-                                                        else { selIndex = index; textSelect = false }
+                                                    onLongPress = { offset ->
+                                                        if (selIndex == absIndex) {
+                                                            // 第二次长按：直接选中按下的那个词组（走系统分词，中文按词切）
+                                                            val layout = layoutResult
+                                                            selRange = if (layout != null) layout.getWordBoundary(layout.getOffsetForPosition(offset)) else TextRange(0, body.length)
+                                                            textSelect = true
+                                                        } else {
+                                                            selIndex = absIndex
+                                                            textSelect = false
+                                                        }
                                                     },
                                                     onTap = {
-                                                        if (selIndex == index) { textSelect = false; selIndex = null }
+                                                        if (selIndex == absIndex) { textSelect = false; selIndex = null }
                                                     }
                                                 )
                                             }
-                                    ) { Text(body, Modifier.padding(14.dp).then(if (selected) Modifier.background(Teal.copy(alpha = .22f)) else Modifier)) }
+                                    ) { Text(body, Modifier.padding(14.dp).then(if (selected) Modifier.background(Teal.copy(alpha = .22f)) else Modifier), onTextLayout = { layoutResult = it }) }
                                 }
                             }
                             if (refTitle != null) {
@@ -890,15 +932,34 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                             }
                         }
                     }
-                    // 转写期间先假装已发出：用户侧占位，AI 侧用省略号表示正在思考
+                    // 语音草稿：流式文字直接长在对话记录里的用户气泡上，气泡随文本变化大小
+                    if (listening || transcribing) {
+                        item {
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = androidx.compose.ui.Alignment.End) {
+                                Surface(color = androidx.compose.ui.graphics.Color(0xFFE8EEF2), shape = RoundedCornerShape(16.dp)) {
+                                    Text(voiceDraft.ifBlank { "…" }, Modifier.padding(horizontal = 18.dp, vertical = 14.dp))
+                                }
+                            }
+                        }
+                    }
+                    // 转写期间 AI 侧用省略号表示正在思考
                     if (transcribing) {
-                        item { Column(Modifier.fillMaxWidth(), horizontalAlignment = androidx.compose.ui.Alignment.End) { Surface(color = androidx.compose.ui.graphics.Color(0xFFE8EEF2), shape = RoundedCornerShape(16.dp)) { Text("…", Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) } } }
                         item { Column(Modifier.fillMaxWidth(), horizontalAlignment = androidx.compose.ui.Alignment.Start) { Surface(color = androidx.compose.ui.graphics.Color(0xFFDDF2EC), shape = RoundedCornerShape(16.dp)) { Text("…", Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) } } }
                     }
                 }
             }
             if (s.aiLoading) Text("AI 正在思考...", Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (s.generatingItem) Text("AI 正在整理词条…", Modifier.padding(vertical = 8.dp), color = Teal)
+            // 引用的对话内容卡片（与引用单词同一形态）
+            s.aiTextRef?.let { quoted ->
+                Surface(color = Orange.copy(alpha = .12f), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) { Text("引用内容", style = MaterialTheme.typography.labelMedium, color = Orange); Text(quoted, style = MaterialTheme.typography.bodySmall, maxLines = 3) }
+                        IconButton({ vm.clearTextRef() }) { Icon(Icons.Default.Close, "移除引用", tint = Orange) }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             s.aiReference?.let { item ->
                 Surface(color = Teal.copy(alpha = .10f), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Row(Modifier.padding(12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -908,20 +969,31 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
                 }
                 Spacer(Modifier.height(8.dp))
             }
-            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                OutlinedTextField(text, { text = it }, Modifier.weight(1f), placeholder = { Text("问问当前词条") }, singleLine = false, maxLines = 3)
-                IconButton({ vm.ask(text); text = "" }, enabled = text.isNotBlank() && !s.aiLoading) { Icon(Icons.Default.AutoAwesome, "发送问题") }
+            if (voiceMode) {
+                // 语音模式：文本框整体变成「按住说话」
+                Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    VoicePushToTalkButton(
+                        s = s,
+                        vm = vm,
+                        listening = listening,
+                        modifier = Modifier.weight(1f),
+                        onPartial = { partial -> voiceDraft = partial },
+                        onFinal = { finalText -> transcribing = false; voiceDraft = ""; if (finalText.isNotBlank()) vm.ask(finalText) },
+                        onListeningChanged = { isListening -> listening = isListening },
+                        onTranscribing = { value -> transcribing = value }
+                    )
+                    IconButton({ voiceMode = false }) { Icon(Icons.Default.Keyboard, "切换到打字") }
+                }
+            } else {
+                Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    OutlinedTextField(text, { text = it }, Modifier.weight(1f), placeholder = { Text("问问当前词条") }, singleLine = false, maxLines = 3)
+                    // 没字时是「切换语音」，有字时变成「发送」
+                    IconButton(
+                        onClick = { if (text.isBlank()) voiceMode = true else { vm.ask(text); text = "" } },
+                        enabled = !s.aiLoading
+                    ) { Icon(if (text.isBlank()) Icons.Default.Mic else Icons.Default.Send, if (text.isBlank()) "切换到语音输入" else "发送") }
+                }
             }
-            VoicePushToTalkButton(
-                s = s,
-                vm = vm,
-                listening = listening,
-                onPartial = { partial -> text = partial },
-                // 语音转写完成后直接发送，无需再点发送
-                onFinal = { finalText -> transcribing = false; if (finalText.isNotBlank()) { text = ""; vm.ask(finalText) } },
-                onListeningChanged = { isListening -> listening = isListening },
-                onTranscribing = { value -> transcribing = value }
-            )
         }
         if (listening) VoiceListeningOverlay()
     }
@@ -992,7 +1064,7 @@ fun VoiceListeningOverlay() {
 }
 
 @Composable
-fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, listening: Boolean, onPartial: (String) -> Unit, onFinal: (String) -> Unit, onListeningChanged: (Boolean) -> Unit, onTranscribing: (Boolean) -> Unit) {
+fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, listening: Boolean, modifier: Modifier = Modifier, onPartial: (String) -> Unit, onFinal: (String) -> Unit, onListeningChanged: (Boolean) -> Unit, onTranscribing: (Boolean) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     // 系统语音服务不可用时（模拟器、部分精简 ROM）自动回退到离线模型
     val engine = if (s.sttEngine == SttEngine.SYSTEM && !vm.systemVoice.isReady) SttEngine.CLOUD else s.sttEngine
@@ -1015,11 +1087,12 @@ fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, listening: Boolean
             )
         }
     }
-    Column(Modifier.fillMaxWidth().padding(bottom = 14.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+    Column(modifier.padding(bottom = 2.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
         Box(
             Modifier
-                .size(72.dp)
-                .background(if (listening) Orange else Teal, RoundedCornerShape(36.dp))
+                .fillMaxWidth()
+                .height(52.dp)
+                .background(if (listening) Orange else Teal, RoundedCornerShape(26.dp))
                 .pointerInput(engine, ready, hasPermission) {
                     detectTapGestures(
                         onPress = {
@@ -1063,9 +1136,14 @@ fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, listening: Boolean
                     )
                 },
             contentAlignment = androidx.compose.ui.Alignment.Center
-        ) { Icon(Icons.Default.Mic, if (listening) "松开结束" else "按住说话", tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(32.dp)) }
-        Text(if (listening) "松开结束" else "按住说话", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-        Text(engine.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Icon(Icons.Default.Mic, null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (listening) "松开结束" else "按住说话", color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.titleSmall)
+            }
+        }
+        Text(engine.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
         if (fallback) Text("系统语音服务不可用，已自动改用离线中英双语识别", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp))
         status?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp)) }
     }

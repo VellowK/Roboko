@@ -28,10 +28,12 @@ Kotlin、Jetpack Compose、Material 3 fallback 组件。MIUIX 组件接入点保
 
 ## 运行
 
-使用 Android Studio 打开本目录，使用 JDK 17 同步并运行 `app`。当前版本为 `2.0.0`，学习条目和 AI 对话使用 Room 本地持久化，API Key 使用 Android Keystore 加密。
+使用 Android Studio 打开本目录，使用 JDK 17 同步并运行 `app`。当前版本为 `2.0.1`，学习条目和 AI 对话使用 Room 本地持久化，API Key 使用 Android Keystore 加密。
 
 ## 分层
 
-- `app/src/main/java/com/roboko/app/MainActivity.kt`：领域模型、ReviewEngine、MockRepository、ViewModel 和 MVP 页面
+- `app/src/main/java/com/roboko/app/MainActivity.kt`：领域模型、ReviewEngine、LearningRepository、ViewModel 和页面
+- `app/src/main/java/com/roboko/app/SttEngine.kt`：语音识别引擎抽象（系统识别 / 云端识别）
+- `app/src/main/java/com/roboko/app/CloudVoiceInput.kt`：云端语音识别（OpenAI 转写接口 / 对话式音频接口）
 - UI 通过 `AppUiState` 单向渲染；页面不直接访问数据层
 - 复习进度集中由 `ReviewEngine` 计算，提示后的答题使用较小的进度变化
