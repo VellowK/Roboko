@@ -9,12 +9,10 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.content.Intent
 
-/** 语音识别引擎。SYSTEM 为 Android 官方 API，其余为 Vosk 离线模型。 */
+/** 语音识别引擎。SYSTEM 为 Android 官方 API，CLOUD 为 OpenAI 兼容的云端转写接口。 */
 enum class SttEngine(val label: String, val detail: String) {
-    SYSTEM("系统识别（默认）", "调用 Android 官方语音识别，支持中英混说，需要设备语音服务"),
-    VOSK_CN("Vosk 离线 · 中文", "完全离线，仅中文，不依赖系统语音服务"),
-    VOSK_EN("Vosk 离线 · 英文", "完全离线，仅英文，不依赖系统语音服务"),
-    VOSK_BOTH("Vosk 离线 · 中英双引擎", "离线同时跑中英模型，按段择优；流畅混说效果有限")
+    SYSTEM("系统识别（默认）", "调用 Android 官方语音识别，无需配置，需要设备提供语音服务"),
+    CLOUD("云端识别", "填写 OpenAI 兼容转写接口（如硅基流动 SenseVoice 免费），支持中英混说；录音结束后出字")
 }
 
 /** 语音识别控制器统一接口，供语音按钮调用。 */
@@ -50,7 +48,7 @@ class SystemVoiceInput(private val context: Context) : SttController {
     override val isLoading: Boolean get() = false
 
     override fun prepare(onReady: () -> Unit, onError: (String) -> Unit) {
-        if (isReady) main.post(onReady) else main.post { onError("当前设备没有可用的系统语音识别服务，请在设置中改用 Vosk 离线识别") }
+        if (isReady) main.post(onReady) else main.post { onError("当前设备没有可用的系统语音识别服务，可在设置中改用离线中英双语识别") }
     }
 
     override fun start(onPartial: (String) -> Unit, onFinal: (String) -> Unit, onError: (String) -> Unit): Boolean {
@@ -123,7 +121,7 @@ class SystemVoiceInput(private val context: Context) : SttController {
         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有检测到语音"
         SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音识别网络异常"
         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别器忙，请重试"
-        SpeechRecognizer.ERROR_CLIENT -> "系统识别器异常，可在设置中改用 Vosk 离线识别"
+        SpeechRecognizer.ERROR_CLIENT -> "系统识别器异常，可在设置中改用离线中英双语识别"
         else -> "语音识别失败（错误码 $error）"
     }
 }

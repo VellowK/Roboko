@@ -23,6 +23,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +45,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -227,6 +230,34 @@ private class LocalProviderStore(context: android.content.Context) {
     fun saveMessages(messages: List<String>) { val array = org.json.JSONArray(); messages.forEach { array.put(it) }; prefs.edit().putString("messages", array.toString()).apply() }
     fun loadStt(): SttEngine = runCatching { SttEngine.valueOf(prefs.getString("sttEngine", SttEngine.SYSTEM.name) ?: SttEngine.SYSTEM.name) }.getOrDefault(SttEngine.SYSTEM)
     fun saveStt(engine: SttEngine) { prefs.edit().putString("sttEngine", engine.name).apply() }
+    // 各预设的 API Key 分开保存，避免切换预设时串用
+    private fun sttKeySlot(id: String) = "sttApiKey_" + (if (id.isBlank()) "custom" else id)
+
+    fun loadSttCloudKeys(): Map<String, String> =
+        (sttPresets.map { it.presetId } + "custom").associateWith { decrypt(prefs.getString(sttKeySlot(it), "") ?: "") }
+
+    fun loadSttCloud(): SttCloudConfig {
+        val fallback = sttPresets.first()
+        val presetId = prefs.getString("sttPreset", fallback.presetId) ?: fallback.presetId
+        return SttCloudConfig(
+            presetId = presetId,
+            baseUrl = prefs.getString("sttBaseUrl", fallback.baseUrl) ?: fallback.baseUrl,
+            apiKey = decrypt(prefs.getString(sttKeySlot(presetId), "") ?: ""),
+            model = prefs.getString("sttModel", fallback.model) ?: fallback.model,
+            keyUrl = prefs.getString("sttKeyUrl", fallback.keyUrl) ?: fallback.keyUrl,
+            format = runCatching { SttApiFormat.valueOf(prefs.getString("sttFormat", fallback.format.name) ?: fallback.format.name) }.getOrDefault(fallback.format)
+        )
+    }
+    fun saveSttCloud(config: SttCloudConfig) {
+        prefs.edit()
+            .putString("sttPreset", config.presetId)
+            .putString("sttBaseUrl", config.baseUrl)
+            .putString("sttModel", config.model)
+            .putString("sttKeyUrl", config.keyUrl)
+            .putString("sttFormat", config.format.name)
+            .putString(sttKeySlot(config.presetId), encrypt(config.apiKey))
+            .apply()
+    }
 }
 
 private object AiClient {
@@ -257,7 +288,7 @@ data class GeneratedItem(val item: LearningItem)
 
 enum class LibrarySort { ADDED, ALPHABETICAL, MASTERY }
 
-data class AppUiState(val tab: Tab = Tab.AI, val items: List<LearningItem> = emptyList(), val selectedItemId: String? = null, val query: String = "", val librarySort: LibrarySort = LibrarySort.ADDED, val sortDescending: Boolean = true, val stats: TodayStats = TodayStats(0, 0, 0, 0.0, 0), val review: ReviewUiState = ReviewUiState(null, null), val aiMessages: List<String> = listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。"), val aiLoading: Boolean = false, val showSettings: Boolean = false, val provider: ProviderConfig = providerPresets.first(), val generatedItem: LearningItem? = null, val generatingItem: Boolean = false, val itemError: String? = null, val aiReference: LearningItem? = null, val balanceStatus: String? = null, val updateVersion: String? = null, val updateNotes: String = "", val updateUrl: String? = null, val updateChecking: Boolean = false, val mirror: String = "GitHub 官方", val sttEngine: SttEngine = SttEngine.SYSTEM)
+data class AppUiState(val tab: Tab = Tab.AI, val items: List<LearningItem> = emptyList(), val selectedItemId: String? = null, val query: String = "", val librarySort: LibrarySort = LibrarySort.ADDED, val sortDescending: Boolean = true, val stats: TodayStats = TodayStats(0, 0, 0, 0.0, 0), val review: ReviewUiState = ReviewUiState(null, null), val aiMessages: List<String> = listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。"), val aiLoading: Boolean = false, val showSettings: Boolean = false, val provider: ProviderConfig = providerPresets.first(), val generatedItem: LearningItem? = null, val generatingItem: Boolean = false, val itemError: String? = null, val aiReference: LearningItem? = null, val balanceStatus: String? = null, val updateVersion: String? = null, val updateNotes: String = "", val updateUrl: String? = null, val updateChecking: Boolean = false, val mirror: String = "GitHub 官方", val sttEngine: SttEngine = SttEngine.SYSTEM, val sttCloud: SttCloudConfig = SttCloudConfig(), val sttKeys: Map<String, String> = emptyMap(), val sttTesting: Boolean = false, val sttTestResult: String? = null)
 
 object ReviewEngine {
     fun update(progress: Double, known: Boolean, hint: Boolean): Double {
@@ -304,16 +335,41 @@ class RobokoViewModel(app: android.app.Application) : AndroidViewModel(app) {
     private val repo = MockRepository(app)
     private val roomStore = RoomItemStore(app)
     private val providerStore = LocalProviderStore(app)
-    private val _state = MutableStateFlow(AppUiState(items = repo.items.value, stats = repo.stats, aiMessages = roomStore.loadMessages().ifEmpty { listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。") }, provider = providerStore.load(), sttEngine = providerStore.loadStt()))
+    private val _state = MutableStateFlow(AppUiState(items = repo.items.value, stats = repo.stats, aiMessages = roomStore.loadMessages().ifEmpty { listOf("AI：你好，我可以帮你理解语境、整理词义，或发现相关学习对象。") }, provider = providerStore.load(), sttEngine = providerStore.loadStt(), sttCloud = providerStore.loadSttCloud(), sttKeys = providerStore.loadSttCloudKeys()))
     val state: StateFlow<AppUiState> = _state.asStateFlow()
-    val vosk = VoskVoiceInput(app)
+    val cloudVoice = CloudVoiceInput(app).also { it.config = providerStore.loadSttCloud() }
     val systemVoice = SystemVoiceInput(app)
     init {
-        vosk.setEngine(_state.value.sttEngine)
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default).launch { repo.items.collect { _state.value = _state.value.copy(items = it) } }
     }
-    override fun onCleared() { super.onCleared(); vosk.shutdown(); systemVoice.shutdown() }
-    fun setSttEngine(engine: SttEngine) { providerStore.saveStt(engine); vosk.setEngine(engine); _state.value = _state.value.copy(sttEngine = engine) }
+    override fun onCleared() { super.onCleared(); cloudVoice.shutdown(); systemVoice.shutdown() }
+    fun setSttEngine(engine: SttEngine) { providerStore.saveStt(engine); _state.value = _state.value.copy(sttEngine = engine) }
+
+    /** 保存云端识别配置（API Key 按预设分开保存）。 */
+    fun saveSttCloud(config: SttCloudConfig) {
+        providerStore.saveSttCloud(config)
+        cloudVoice.config = config
+        _state.value = _state.value.copy(
+            sttCloud = config,
+            sttKeys = providerStore.loadSttCloudKeys(),
+            sttTestResult = null
+        )
+        if (_state.value.sttEngine == SttEngine.SYSTEM) setSttEngine(SttEngine.CLOUD)
+    }
+
+    /** 用静音音频实测配置，结果直接显示给用户，便于区分是配置问题还是别的问题。 */
+    fun testSttCloud(config: SttCloudConfig) {
+        if (_state.value.sttTesting) return
+        _state.value = _state.value.copy(sttTesting = true, sttTestResult = "正在测试…")
+        viewModelScope.launch {
+            val result = cloudVoice.test(config)
+            _state.value = _state.value.copy(sttTesting = false, sttTestResult = result)
+        }
+    }
+
+    /** 当前实际生效的引擎：系统识别不可用时回退到云端识别。 */
+    fun activeVoice(): SttController =
+        if (_state.value.sttEngine == SttEngine.SYSTEM && systemVoice.isReady) systemVoice else cloudVoice
     fun tab(tab: Tab) { _state.value = _state.value.copy(tab = tab, selectedItemId = null) }
     fun search(q: String) { _state.value = _state.value.copy(query = q) }
     fun cycleSort() { val current = _state.value; val next = when (current.librarySort) { LibrarySort.ADDED -> LibrarySort.ALPHABETICAL; LibrarySort.ALPHABETICAL -> LibrarySort.MASTERY; LibrarySort.MASTERY -> LibrarySort.ADDED }; _state.value = current.copy(librarySort = next, sortDescending = if (next == current.librarySort) !current.sortDescending else true) }
@@ -508,23 +564,100 @@ fun AboutScreen(vm: RobokoViewModel, onBack: () -> Unit) {
 
 @Composable
 fun VoiceSettingsPage(s: AppUiState, vm: RobokoViewModel, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+    var presetId by remember(s.sttCloud) { mutableStateOf(s.sttCloud.presetId) }
+    var baseUrl by remember(s.sttCloud) { mutableStateOf(s.sttCloud.baseUrl) }
+    var apiKey by remember(s.sttCloud) { mutableStateOf(s.sttCloud.apiKey) }
+    var model by remember(s.sttCloud) { mutableStateOf(s.sttCloud.model) }
+    var keyUrl by remember(s.sttCloud) { mutableStateOf(s.sttCloud.keyUrl) }
+    var format by remember(s.sttCloud) { mutableStateOf(s.sttCloud.format) }
+    val linkContext = androidx.compose.ui.platform.LocalContext.current
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 16.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             TextButton(onBack) { Text("返回设置") }
             Text("语音识别", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 8.dp))
         }
-        Text("默认使用 Android 系统识别。若系统识别不可用（例如部分机型报错），可切换到 Vosk 离线模型。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 12.dp))
+        Text("默认使用 Android 系统识别。若系统识别不可用，或想要更好的中英混说效果，可配置下方云端识别接口。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 12.dp))
         SttEngine.values().forEach { engine ->
             Row(Modifier.fillMaxWidth().clickable { vm.setSttEngine(engine) }.padding(vertical = 12.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = s.sttEngine == engine, onClick = { vm.setSttEngine(engine) })
                 Column(Modifier.weight(1f).padding(start = 4.dp)) {
                     Text(engine.label, style = MaterialTheme.typography.titleSmall)
                     Text(engine.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (engine == SttEngine.SYSTEM && !vm.systemVoice.isReady) Text("当前设备没有可用的系统语音服务，将自动改用 Vosk 离线识别", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    if (engine == SttEngine.SYSTEM && !vm.systemVoice.isReady) Text("当前设备没有可用的系统语音服务，将自动使用云端识别", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
             }
         }
+        Spacer(Modifier.height(20.dp))
+        Text("云端识别设置", style = MaterialTheme.typography.titleSmall)
+        Text("兼容 OpenAI 的 /audio/transcriptions 接口。硅基流动的 SenseVoiceSmall 免费且支持中英混说。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            sttPresets.forEach { preset ->
+                FilterChip(
+                    selected = presetId == preset.presetId,
+                    onClick = {
+                        presetId = preset.presetId
+                        baseUrl = preset.baseUrl
+                        model = preset.model
+                        keyUrl = preset.keyUrl
+                        // 各预设的 Key 互相独立，切换时载入该预设已保存的 Key
+                        apiKey = s.sttKeys[preset.presetId] ?: ""
+                        format = preset.format
+                    },
+                    label = { Text(sttPresetLabel(preset.presetId)) }
+                )
+            }
+        }
+        if (presetId == "volcano") {
+            Text("火山引擎走私有 WebSocket 协议（大模型流式语音识别），暂未接入。当前请先使用「硅基流动」，其 SenseVoice 免费且支持中英混说。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp))
+        }
+        if (keyUrl.isNotBlank()) {
+            Text(
+                "获取 API Key：$keyUrl",
+                style = MaterialTheme.typography.bodySmall,
+                color = Teal,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { linkContext.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(keyUrl))) }
+                    .padding(vertical = 6.dp)
+            )
+        }
+        OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(), label = { Text("接口地址（Base URL）") }, singleLine = true)
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(apiKey, { apiKey = it }, Modifier.fillMaxWidth(), label = { Text("API Key") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(model, { model = it }, Modifier.fillMaxWidth(), label = { Text("模型名称") }, singleLine = true)
+        Text("接口协议：${format.label}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                { vm.testSttCloud(SttCloudConfig(presetId, baseUrl.trim(), apiKey.trim(), model.trim(), keyUrl, format)) },
+                Modifier.weight(1f),
+                enabled = !s.sttTesting && baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
+            ) { Text(if (s.sttTesting) "测试中…" else "测试连接") }
+            Button(
+                { vm.saveSttCloud(SttCloudConfig(presetId, baseUrl.trim(), apiKey.trim(), model.trim(), keyUrl, format)) },
+                Modifier.weight(1f),
+                enabled = baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()
+            ) { Text("保存") }
+        }
+        s.sttTestResult?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (it.startsWith("✓")) Teal else MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 10.dp)
+            )
+        }
     }
+}
+
+private fun sttPresetLabel(id: String) = when (id) {
+    "siliconflow" -> "硅基流动"
+    "mimo" -> "小米 MiMo"
+    "groq" -> "Groq"
+    "openai" -> "OpenAI"
+    "volcano" -> "火山引擎"
+    else -> id
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -631,19 +764,27 @@ fun AiScreen(s: AppUiState, vm: RobokoViewModel) {
             VoicePushToTalkButton(
                 s = s,
                 vm = vm,
+                listening = listening,
                 onPartial = { partial -> text = partial },
                 onFinal = { finalText -> if (finalText.isNotBlank()) text = finalText },
                 onListeningChanged = { isListening -> listening = isListening }
             )
         }
-        if (listening) VoiceListeningOverlay()
+        if (listening) VoiceListeningOverlay(onStop = { vm.activeVoice().stop(); listening = false })
     }
 }
 
 @Composable
-fun VoiceListeningOverlay() {
+fun VoiceListeningOverlay(onStop: () -> Unit = {}) {
     val transition = rememberInfiniteTransition(label = "voice-bars")
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(androidx.compose.ui.graphics.Color.Black.copy(alpha = .55f), androidx.compose.ui.graphics.Color.Black.copy(alpha = .25f), Teal.copy(alpha = .35f)))), contentAlignment = androidx.compose.ui.Alignment.BottomCenter) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(androidx.compose.ui.graphics.Color.Black.copy(alpha = .55f), androidx.compose.ui.graphics.Color.Black.copy(alpha = .25f), Teal.copy(alpha = .35f))))
+            // 整块渐变区域都可点击结束录音，不必精准点到按钮
+            .pointerInput(Unit) { detectTapGestures { onStop() } },
+        contentAlignment = androidx.compose.ui.Alignment.BottomCenter
+    ) {
         Column(Modifier.padding(bottom = 120.dp), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
             Row(horizontalArrangement = Arrangement.Center, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 repeat(21) { index ->
@@ -652,20 +793,18 @@ fun VoiceListeningOverlay() {
                 }
             }
             Spacer(Modifier.height(20.dp))
-            Text("正在聆听，点击停止", color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.titleMedium)
+            Text("正在聆听，点击任意位置结束", color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.titleMedium)
         }
     }
 }
 
 @Composable
-fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, onPartial: (String) -> Unit, onFinal: (String) -> Unit, onListeningChanged: (Boolean) -> Unit) {
+fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, listening: Boolean, onPartial: (String) -> Unit, onFinal: (String) -> Unit, onListeningChanged: (Boolean) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val requestedEngine = s.sttEngine
-    // 系统语音服务不可用时（模拟器、部分精简 ROM）自动回退到 Vosk 离线识别
-    val fallback = requestedEngine == SttEngine.SYSTEM && !vm.systemVoice.isReady
-    val engine = if (fallback) SttEngine.VOSK_BOTH else requestedEngine
-    val controller: SttController = if (engine == SttEngine.SYSTEM) vm.systemVoice else vm.vosk
-    var listening by remember { mutableStateOf(false) }
+    // 系统语音服务不可用时（模拟器、部分精简 ROM）自动回退到离线模型
+    val engine = if (s.sttEngine == SttEngine.SYSTEM && !vm.systemVoice.isReady) SttEngine.CLOUD else s.sttEngine
+    val fallback = engine != s.sttEngine
+    val controller: SttController = if (engine == SttEngine.SYSTEM) vm.systemVoice else vm.cloudVoice
     var status by remember { mutableStateOf<String?>(null) }
     var ready by remember(engine) { mutableStateOf(controller.isReady) }
     var hasPermission by remember { mutableStateOf(androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
@@ -674,7 +813,6 @@ fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, onPartial: (String
         if (!granted) status = "未授予麦克风权限，无法语音输入"
     }
     LaunchedEffect(engine) {
-        if (engine != SttEngine.SYSTEM) vm.vosk.setEngine(engine)
         if (controller.isReady) { ready = true; status = null }
         else {
             status = if (controller.isLoading) "正在加载离线语音模型…" else null
@@ -691,16 +829,16 @@ fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, onPartial: (String
                 .background(if (listening) Orange else Teal, RoundedCornerShape(36.dp))
                 .clickable {
                     when {
-                        listening -> { controller.stop(); listening = false; onListeningChanged(false) }
+                        listening -> { controller.stop(); onListeningChanged(false) }
                         !hasPermission -> permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         !ready -> status = if (controller.isLoading) "正在加载离线语音模型…" else "语音引擎尚未就绪"
                         else -> {
                             val started = controller.start(
                                 onPartial = { partial -> onPartial(partial) },
-                                onFinal = { finalText -> if (finalText.isNotBlank()) onFinal(finalText); listening = false; onListeningChanged(false) },
-                                onError = { message -> status = message; listening = false; onListeningChanged(false) }
+                                onFinal = { finalText -> if (finalText.isNotBlank()) onFinal(finalText); onListeningChanged(false) },
+                                onError = { message -> status = message; onListeningChanged(false) }
                             )
-                            if (started) { listening = true; onListeningChanged(true); status = null }
+                            if (started) { onListeningChanged(true); status = null }
                         }
                     }
                 },
@@ -708,7 +846,7 @@ fun VoicePushToTalkButton(s: AppUiState, vm: RobokoViewModel, onPartial: (String
         ) { Icon(Icons.Default.Mic, if (listening) "点击停止" else "点击说话", tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(32.dp)) }
         Text(if (listening) "点击停止" else "点击说话", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
         Text(engine.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (fallback) Text("系统语音服务不可用，已自动改用 Vosk 离线识别", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp))
+        if (fallback) Text("系统语音服务不可用，已自动改用离线中英双语识别", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp))
         status?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 2.dp)) }
     }
 }

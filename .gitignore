@@ -13,7 +13,5 @@ local.properties
 # 反编译恢复参考（临时）
 .recovery/
 
-# 离线语音模型（体积大，构建前按需下载到 app/src/main/assets/）
-#   https://alphacephei.com/vosk/models/vosk-model-small-cn-0.3.zip
-#   https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-app/src/main/assets/*.zip
+# 构建产物（APK 不进仓库）
+*.apk

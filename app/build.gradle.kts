@@ -6,13 +6,9 @@ plugins {
 }
 
 android { namespace = "com.roboko.app"; compileSdk = 35
-    defaultConfig { applicationId = "com.roboko.app"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "2.0.0"
-        // Vosk 为 5 种 ABI 各带一个约 10MB 的 libvosk.so，只保留真机 ARM 与 x86_64 模拟器
-        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
-    }
+    defaultConfig { applicationId = "com.roboko.app"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "2.0.0" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
     kotlinOptions { jvmTarget = "1.8" }
-    aaptOptions { noCompress("zip") }
 }
 
 dependencies {
@@ -27,7 +23,5 @@ dependencies {
     implementation("androidx.room:room-runtime:2.7.0")
     implementation("androidx.room:room-ktx:2.7.0")
     ksp("androidx.room:room-compiler:2.7.0")
-    implementation("com.alphacephei:vosk-android:0.3.75@aar")
-    implementation("net.java.dev.jna:jna:5.18.1@aar")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
