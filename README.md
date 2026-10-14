@@ -19,7 +19,7 @@ Roboko 是一款以真实语境、AI 辅助整理和自适应复习为核心的�
 - AI 输入支持文字和 Android 语音识别，语音结果先回填后发送；录音时显示渐变遮罩和动态声纹动画
 - AI Provider 预设：DeepSeek、ModelScope、火山 Agent Plan、火山 Coding Plan
 - 设置采用无边框文字列表风格，包含通用设置、Provider 设置和关于软件
-- 关于页支持 GitHub 仓库、版本/构建日期、GitHub latest release 检查和 APK 下载更新
+- 关于页显示实际安装版本，比较 GitHub latest release 版本后才提供更高正式版的 APK 下载更新
 - 通用设置支持 GitHub 官方、gh-proxy.net、gh-proxy.com 下载镜像选择
 
 ## 技术栈
@@ -28,7 +28,16 @@ Kotlin、Jetpack Compose、Material 3 fallback 组件。MIUIX 组件接入点保
 
 ## 运行
 
-使用 Android Studio 打开本目录，使用 JDK 17 同步并运行 `app`。当前版本为 `2.0.1`，学习条目和 AI 对话使用 Room 本地持久化，API Key 使用 Android Keystore 加密。
+使用 Android Studio 打开本目录，使用 JDK 17 同步并运行 `app`。当前版本为 `2.0.2`，学习条目和 AI 对话使用 Room 本地持久化，API Key 使用 Android Keystore 加密。
+
+## 滚动性能与键盘验收
+
+- AI 对话使用完整历史的惰性列表，不在上翻时按四条反复追加；后台缓存解析后的消息行，新增消息复用旧行与稳定 key。
+- 单词本在后台建立搜索索引和排序结果，行只接收轻量不可变数据；搜索或排序切换不会在 UI 线程重新遍历全部语境。
+- AI 顶部操作栏位于滚动区之外。键盘采用 `adjustResize` 与 IME insets，弹出时暂时隐藏底部导航；整条选中和局部选词均使用顶部复制、加入单词本、翻译、引用按钮。
+- 请用 **JDK 17** 执行 `gradle :app:testDebugUnitTest :app:assemblePerformance`，或在 Android Studio 的 Build Variants 选择 `performance`。产物为 `app/build/outputs/apk/performance/app-performance.apk`；启用 R8 与资源优化、关闭 debuggable，但仍使用本机 debug 签名，仅用于本地验证，不是正式发布包。普通 `debug` 包仍可构建。
+- 真机检查：长列表来回滑动、收到 AI 回复时阅读旧消息不被拉回、键盘打开后长按消息并再次长按选词/拖动范围，再点顶部四项操作；覆盖返回键、横屏、不同输入法和较大字体。
+- 单元测试和构建不能证明实际帧率。若仍卡顿，应使用 Android Studio System Trace / Perfetto 对优化包记录帧耗时，按 UI 线程、文本测量或 GC 热点继续优化，而不是直接承诺流畅度。
 
 ## 分层
 

@@ -6,9 +6,21 @@ plugins {
 }
 
 android { namespace = "com.roboko.app"; compileSdk = 35
-    defaultConfig { applicationId = "com.roboko.app"; minSdk = 26; targetSdk = 35; versionCode = 2; versionName = "2.0.1" }
+    defaultConfig { applicationId = "com.roboko.app"; minSdk = 26; targetSdk = 35; versionCode = 3; versionName = "2.0.2" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
     kotlinOptions { jvmTarget = "1.8" }
+    buildTypes {
+        // Local, installable release-like build; retain the existing debug signing identity.
+        create("performance") {
+            initWith(getByName("release"))
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+        }
+    }
 }
 
 dependencies {
@@ -24,4 +36,7 @@ dependencies {
     implementation("androidx.room:room-ktx:2.7.0")
     ksp("androidx.room:room-compiler:2.7.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
+    // Android 的 JSONObject 在 JVM 单元测试中是桩实现；使用真实 JSON 实现验证语境持久化。
+    testImplementation("org.json:json:20180813")
 }
