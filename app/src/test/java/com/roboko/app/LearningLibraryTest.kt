@@ -90,6 +90,39 @@ class LearningLibraryTest {
         assertEquals("word-1999", filtered.entries.single().id)
     }
 
+    @Test fun savedWordsMatchBothHeadwordAndDisplayFormIgnoringCaseAndSpacing() {
+        val saved = item("first", "2026-01-01T00:00:00Z").copy(headword = "take off", displayForm = "Take   Off")
+        val keys = LearningLibrary.savedWordKeys(listOf(saved))
+        assertTrue(LearningLibrary.wordKey("  TAKE off  ") in keys)
+        assertFalse(LearningLibrary.wordKey("take") in keys)
+        val variant = saved.copy(headword = "color", displayForm = "colour")
+        assertEquals(setOf("color", "colour"), LearningLibrary.savedWordKeys(listOf(variant)))
+    }
+
+    @Test fun savedWordsNormalizeCurlyApostropheWithoutConflatingOtherWords() {
+        val saved = item("first", "2026-01-01T00:00:00Z").copy(headword = "can't", displayForm = "can’t")
+        val keys = LearningLibrary.savedWordKeys(listOf(saved))
+        assertTrue(LearningLibrary.wordKey("Can’t") in keys)
+        assertFalse(LearningLibrary.wordKey("cant") in keys)
+    }
+
+    @Test fun savedWordsRefreshAfterConfirmationDeletionAndRestore() {
+        val saved = item("ephemeral", "2026-01-01T00:00:00Z")
+        val before = LearningLibrary.savedWordKeys(emptyList())
+        val after = LearningLibrary.savedWordKeys(listOf(saved))
+        val deleted = LearningLibrary.savedWordKeys(listOf(saved.copy(deletedAt = saved.createdAt)))
+        assertFalse("ephemeral" in before)
+        assertTrue("ephemeral" in after)
+        assertFalse("ephemeral" in deleted)
+        assertEquals(after, LearningLibrary.savedWordKeys(listOf(saved)))
+        assertFalse("ephemeral" in LearningLibrary.savedWordKeys(emptyList()))
+    }
+
+    @Test fun blankOrDuplicateDisplayFormsDoNotAddBogusKeys() {
+        val saved = item("ephemeral", "2026-01-01T00:00:00Z").copy(displayForm = " ")
+        assertEquals(setOf("ephemeral"), LearningLibrary.savedWordKeys(listOf(saved, saved)))
+    }
+
     @Test fun lightweightRowsHandleMissingMeaningsWithoutNan() {
         val empty = item("empty", "2026-01-01T00:00:00Z").copy(meanings = emptyList())
         assertEquals(0.0, LearningLibrary.entry(empty).progress, 0.0)

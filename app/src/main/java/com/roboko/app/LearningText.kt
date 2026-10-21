@@ -54,6 +54,8 @@ internal object LearningText {
     fun sourceContexts(word: String, source: String?): List<String> {
         if (source.isNullOrBlank() || word.isBlank()) return emptyList()
         val clean = parse(source).body.trim()
+        // A multiword target such as "take care of" is not itself a source sentence.
+        if (clean.replace(whitespace, " ").equals(word.trim().replace(whitespace, " "), ignoreCase = true)) return emptyList()
         val target = Regex("(?<![A-Za-z])${Regex.escape(word.trim())}(?![A-Za-z])", RegexOption.IGNORE_CASE)
         fun isContext(value: String) = expression.findAll(value).sumOf { it.value.split(Regex("\\s+")).size } >= 3 && target.containsMatchIn(value)
         if (clean.none { it in '\u4e00'..'\u9fff' } && isContext(clean)) return listOf(clean)
@@ -73,6 +75,8 @@ internal object LearningText {
         if (requiredContexts.isNotEmpty()) {
             append("\n以下英文语境必须逐字保留在对应词义的 contexts.english 中，中文翻译放入 contexts.chinese：\n")
             requiredContexts.forEach { append(it).append("\n") }
+        } else {
+            append("\n若素材只是单词/短语、中文释义或推荐词列表，没有真实英文语境，请为每个词义主动生成一条包含该词的自然、完整英文例句及完整中文翻译，不要留空或报缺少语境。")
         }
         append("\n只返回 JSON，不要 Markdown 代码块。最多 3 个常用词义，每个词义必须有至少一条非空英文语境及其完整中文翻译；没有原始语境时生成自然的例句。每个词义选择一条 representative=true 的语境。")
         append("\n格式：{\"headword\":\"单词或短语\",\"displayForm\":\"展示形式\",\"phoneticUs\":\"\",\"phoneticUk\":\"\",\"meanings\":[{\"label\":\"中文短释义\",\"partOfSpeech\":\"词性\",\"englishDefinition\":\"英英释义\",\"chineseDefinition\":\"中文释义\",\"contexts\":[{\"english\":\"完整英文语境\",\"chinese\":\"完整中文翻译\",\"representative\":true}]}],\"categories\":[\"分类\"]}")

@@ -8,7 +8,15 @@ import java.util.Locale
 internal data class LibraryEntry(val id: String, val displayForm: String, val label: String, val progress: Double)
 
 internal object LearningLibrary {
+    private val wordWhitespace = Regex("\\s+")
+
     fun active(items: List<LearningItem>): List<LearningItem> = items.filter { it.deletedAt == null }
+
+    fun wordKey(word: String): String = word.trim().replace(wordWhitespace, " ")
+        .replace('’', '\'').lowercase(Locale.ROOT)
+
+    fun savedWordKeys(items: List<LearningItem>): Set<String> = active(items)
+        .flatMap { listOf(wordKey(it.headword), wordKey(it.displayForm)) }.filter { it.isNotBlank() }.toSet()
 
     fun recent(items: List<LearningItem>, limit: Int = 3): List<LearningItem> =
         active(items).sortedByDescending { it.createdAt }.take(limit)

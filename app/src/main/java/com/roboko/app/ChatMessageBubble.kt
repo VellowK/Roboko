@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +44,7 @@ internal fun ChatMessageBubble(
     selected: Boolean,
     selectionRange: TextRange?,
     generating: Boolean,
+    savedWordKeys: Set<String>,
     onLongPress: (Long, TextRange) -> Unit,
     onSelectionChange: (Long, TextRange) -> Unit,
     onTap: (Long) -> Unit,
@@ -99,7 +101,16 @@ internal fun ChatMessageBubble(
         if (message.candidates.isNotEmpty()) {
             FlowRow(Modifier.widthIn(max = 280.dp).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 message.candidates.forEach { word ->
-                    AssistChip(onClick = { onGenerate(word, message.full) }, label = { Text("+ $word") }, enabled = !generating)
+                    val added = LearningLibrary.wordKey(word) in savedWordKeys
+                    AssistChip(
+                        onClick = { if (!added) onGenerate(word, message.full) },
+                        label = { Text(if (added) word else "+ $word") },
+                        enabled = !added && !generating,
+                        colors = AssistChipDefaults.assistChipColors(
+                            disabledContainerColor = if (added) primary.copy(alpha = .14f) else Color.Transparent,
+                            disabledLabelColor = if (added) primary else MaterialTheme.colorScheme.onSurface.copy(alpha = .38f)
+                        )
+                    )
                 }
             }
         }

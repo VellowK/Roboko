@@ -1,6 +1,9 @@
 package com.roboko.app
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -96,15 +99,22 @@ class CloudVoiceInput(private val context: Context) : SttController {
             return false
         }
         if (isListening) return false
+        // Recheck here as permission may have been revoked since the UI last requested it.
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            onError("未授予麦克风权限，请允许麦克风权限后重试")
+            return false
+        }
+        var openedOutput: RandomAccessFile? = null
+        var openedRecord: AudioRecord? = null
         return try {
             val wav = File(context.cacheDir, "stt-rec.wav")
             if (wav.exists()) wav.delete()
             val partialFile = File(context.cacheDir, "stt-partial.wav")
-            val out = RandomAccessFile(wav, "rw")
+            val out = RandomAccessFile(wav, "rw").also { openedOutput = it }
             out.setLength(0)
             out.write(ByteArray(44))   // 先占位 WAV 头，每次发送前回填长度
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            val record = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, CHUNK * 4))
+            val record = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, CHUNK * 4)).also { openedRecord = it }
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 out.close(); record.release()
                 onError("无法初始化录音设备")
@@ -120,11 +130,14 @@ class CloudVoiceInput(private val context: Context) : SttController {
                 var pcmBytes = 0L
                 var peak = 0
                 var lastPartialAt = 0L
+                var recordingFailed = false
                 try {
                     record.startRecording()
+                    check(record.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "无法开始录音，请检查麦克风权限" }
                     while (running) {
                         val n = record.read(buf, 0, buf.size)
-                        if (n <= 0) continue
+                        check(n >= 0) { "录音读取失败，请检查麦克风权限或录音设备" }
+                        if (n == 0) continue
                         out.seek(pcmBytes + 44)     // 始终追加到音频末尾
                         out.write(buf, 0, n)
                         pcmBytes += n
@@ -171,8 +184,11 @@ class CloudVoiceInput(private val context: Context) : SttController {
                         }
                     }
                 } catch (e: Exception) {
+                    recordingFailed = true
                     Log.e(TAG, "录音异常", e)
-                    main.post { onError(e.message ?: "录音中断") }
+                    main.post {
+                        onError(if (e is SecurityException) "麦克风权限不可用，请重新授权后重试" else e.message ?: "录音中断")
+                    }
                 } finally {
                     try { record.stop() } catch (_: Exception) {}
                     try { record.release() } catch (_: Exception) {}
@@ -181,8 +197,13 @@ class CloudVoiceInput(private val context: Context) : SttController {
                     isListening = false
                     try {
                         writeWavHeader(out, pcmBytes)
-                        out.close()
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                    } finally {
+                        runCatching { out.close() }
+                    }
+                    // An interrupted recording already reported its error; do not upload partial audio
+                    // or replace the permission error with a second "recording too short" message.
+                    if (recordingFailed) return@Thread
                     if (pcmBytes < SAMPLE_RATE / 2) {   // 少于约 0.5 秒视为没说话
                         main.post { onError("录音太短，请再试一次"); onFinal("") }
                         return@Thread
@@ -213,8 +234,12 @@ class CloudVoiceInput(private val context: Context) : SttController {
             }.also { it.start() }
             true
         } catch (e: Exception) {
+            running = false
             isListening = false
-            onError(e.message ?: "无法启动录音，请检查麦克风权限")
+            audioRecord = null
+            runCatching { openedRecord?.release() }
+            runCatching { openedOutput?.close() }
+            onError(if (e is SecurityException) "麦克风权限不可用，请重新授权后重试" else e.message ?: "无法启动录音，请检查麦克风权限")
             false
         }
     }

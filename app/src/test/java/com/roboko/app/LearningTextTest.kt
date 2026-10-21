@@ -53,6 +53,20 @@ class LearningTextTest {
         assertTrue(LearningText.sourceContexts("ephemeral", null).isEmpty())
     }
 
+    @Test fun bareMultiwordTargetsAreNotOriginalContexts() {
+        assertTrue(LearningText.sourceContexts("take care of", "Take   care of").isEmpty())
+        assertTrue(LearningText.sourceContexts("in spite of", "in spite of").isEmpty())
+        assertEquals(listOf("Please take care of your health."),
+            LearningText.sourceContexts("take care of", "Please take care of your health."))
+    }
+
+    @Test fun absentContextPromptExplicitlyRequestsNewExamplesAndTranslation() {
+        val prompt = LearningText.generationPrompt("take care of", "take care of", emptyList())
+        assertTrue(prompt.contains("主动生成"))
+        assertTrue(prompt.contains("完整英文例句及完整中文翻译"))
+        assertTrue(prompt.contains("不要留空或报缺少语境"))
+    }
+
     @Test fun generationPromptRequiresContextAndFullTranslation() {
         val source = "The beauty of the sunset is ephemeral."
         val prompt = LearningText.generationPrompt("ephemeral", source, listOf(source))
